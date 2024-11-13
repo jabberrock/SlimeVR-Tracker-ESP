@@ -26,6 +26,7 @@
 #include "../SensorFusionRestDetect.h"
 #include "../sensor.h"
 #include "GlobalVars.h"
+#include "motionprocessing/OnlineGyroCalibrator.h"
 
 namespace SlimeVR::Sensors {
 
@@ -35,7 +36,7 @@ class SoftFusionSensor : public Sensor {
 	using RawVectorT = std::array<int16_t, 3>;
 	static constexpr auto UpsideDownCalibrationInit = true;
 	static constexpr auto GyroCalibDelaySeconds = 5;
-	static constexpr auto GyroCalibSeconds = 5;
+	static constexpr auto GyroCalibSeconds = 10;
 	static constexpr auto SampleRateCalibDelaySeconds = 1;
 	static constexpr auto SampleRateCalibSeconds = 5;
 
@@ -116,6 +117,13 @@ class SoftFusionSensor : public Sensor {
 			* AScale;
 
 		m_fusion.updateAcc(accelData, m_calibration.A_Ts);
+
+		sensor_real_t rawScaledAccelData[]
+			= {static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[0]) * AScale),
+			   static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[1]) * AScale),
+			   static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[2]) * AScale)};
+
+		m_onlineGyroCalibrator.updateAcc(rawScaledAccelData);
 	}
 
 	void processGyroSample(const int16_t xyz[3], const sensor_real_t timeDelta) {
@@ -131,6 +139,14 @@ class SoftFusionSensor : public Sensor {
 			)
 		};
 		m_fusion.updateGyro(scaledData, m_calibration.G_Ts);
+
+		const sensor_real_t rawScaledData[] = {
+			static_cast<sensor_real_t>((static_cast<sensor_real_t>(xyz[0]) * GScale)),
+			static_cast<sensor_real_t>((static_cast<sensor_real_t>(xyz[1]) * GScale)),
+			static_cast<sensor_real_t>((static_cast<sensor_real_t>(xyz[2]) * GScale))
+		};
+
+		m_onlineGyroCalibrator.updateGryo(xyz, rawScaledData, m_calibration);
 	}
 
 	void eatSamplesForSeconds(const uint32_t seconds) {
@@ -248,7 +264,41 @@ public:
 				== MotionlessCalibDataSize())) {
 			m_calibration = sensorCalibration.data.sfusion;
 			recalcFusion();
-		} else if (sensorCalibration.type == SlimeVR::Configuration::SensorConfigType::NONE) {
+
+			m_Logger.info("Loaded sfusion calibration for sensor %d:", sensorId);
+			m_Logger.info("  IMU = %d", m_calibration.ImuType);
+			m_Logger.info(
+				"  A_B = [%f, %f, %f]",
+				UNPACK_VECTOR_ARRAY(m_calibration.A_B)
+			);
+			m_Logger.info("  A_Ainv = [");
+			m_Logger.info(
+				"    %f, %f, %f,",
+				UNPACK_VECTOR_ARRAY(m_calibration.A_Ainv[0])
+			);
+			m_Logger.info(
+				"    %f, %f, %f,",
+				UNPACK_VECTOR_ARRAY(m_calibration.A_Ainv[1])
+			);
+			m_Logger.info(
+				"    %f, %f, %f,",
+				UNPACK_VECTOR_ARRAY(m_calibration.A_Ainv[2])
+			);
+			m_Logger.info("  ]");
+			m_Logger.info(
+				"  G_off = [%f, %f, %f]",
+				UNPACK_VECTOR_ARRAY(m_calibration.G_off)
+			);
+			m_Logger.info(
+				"  G_Sens = [%f, %f, %f]",
+				UNPACK_VECTOR_ARRAY(m_calibration.G_Sens)
+			);
+			m_Logger.info("  temperature = %f", m_calibration.temperature);
+			m_Logger.info("  A_Ts = %f", m_calibration.A_Ts);
+			m_Logger.info("  G_Ts = %f", m_calibration.G_Ts);
+			m_Logger.info("  M_Ts = %f", m_calibration.M_Ts);
+		} else if (sensorCalibration.type
+				   == SlimeVR::Configuration::SensorConfigType::NONE) {
 			m_Logger.warn(
 				"No calibration data found for sensor %d, ignoring...",
 				sensorId
@@ -265,8 +315,12 @@ public:
 		bool initResult = false;
 
 		if constexpr (HasMotionlessCalib) {
+			// Do not use previously saved motionless gryo calibration because
+			// at-rest bias changes drastically due to Turn-on Bias and
+			// Temperature Bias. Instead, we will do motionless gyro calibration
+			// at startup.
 			typename imu::MotionlessCalibrationData calibData;
-			std::memcpy(&calibData, m_calibration.MotionlessData, sizeof(calibData));
+			calibData.valid = false;
 			initResult = m_sensor.initialize(calibData);
 		} else {
 			initResult = m_sensor.initialize();
@@ -281,6 +335,8 @@ public:
 		m_status = SensorStatus::SENSOR_OK;
 		working = true;
 		[[maybe_unused]] auto lastRawSample = eatSamplesReturnLast(1000);
+
+		bool fullCalibration = false;
 		if constexpr (UpsideDownCalibrationInit) {
 			auto gravity = static_cast<sensor_real_t>(
 				AScale * static_cast<sensor_real_t>(lastRawSample.first[2])
@@ -299,11 +355,18 @@ public:
 				if (gravity > 7.5f) {
 					m_Logger.debug("Starting calibration...");
 					startCalibration(0);
+					fullCalibration = true;
 				} else {
 					m_Logger.info("Flip not detected. Skipping calibration.");
 				}
 
 				ledManager.off();
+			}
+		}
+
+		if constexpr (HasMotionlessCalib) {
+			if (!fullCalibration) {
+				startCalibration(4);  // Motionless calibration
 			}
 		}
 	}
@@ -609,6 +672,11 @@ public:
 	uint32_t m_lastPollTime = micros();
 	uint32_t m_lastRotationPacketSent = 0;
 	uint32_t m_lastTemperaturePacketSent = 0;
+
+	MotionProcessing::OnlineGyroCalibrator m_onlineGyroCalibrator{
+		imu::AccTs,
+		imu::GyrTs
+	};
 };
 
 }  // namespace SlimeVR::Sensors
