@@ -25,6 +25,7 @@
 
 #include "../SensorFusionRestDetect.h"
 #include "../sensor.h"
+#include "motionprocessing/OnlineRestCalibrator.h"
 #include "GlobalVars.h"
 
 namespace SlimeVR::Sensors {
@@ -116,6 +117,14 @@ class SoftFusionSensor : public Sensor {
 			* AScale;
 
 		m_fusion.updateAcc(accelData, m_calibration.A_Ts);
+
+		sensor_real_t rawScaledAccelData[] = {
+			static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[0]) * AScale),
+			static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[1]) * AScale),
+			static_cast<sensor_real_t>(static_cast<sensor_real_t>(xyz[2]) * AScale)
+		};
+
+		m_onlineRestCalibrator.updateAcc(rawScaledAccelData, accelData);
 	}
 
 	void processGyroSample(const int16_t xyz[3], const sensor_real_t timeDelta) {
@@ -131,6 +140,20 @@ class SoftFusionSensor : public Sensor {
 			)
 		};
 		m_fusion.updateGyro(scaledData, m_calibration.G_Ts);
+
+		const sensor_real_t rawScaledData[] = {
+			static_cast<sensor_real_t>(
+				GScale * (static_cast<sensor_real_t>(xyz[0]))
+			),
+			static_cast<sensor_real_t>(
+				GScale * (static_cast<sensor_real_t>(xyz[1]))
+			),
+			static_cast<sensor_real_t>(
+				GScale * (static_cast<sensor_real_t>(xyz[2]))
+			)
+		};
+
+		m_onlineRestCalibrator.updateGryo(rawScaledData, scaledData);
 	}
 
 	void eatSamplesForSeconds(const uint32_t seconds) {
@@ -614,6 +637,8 @@ public:
 	uint32_t m_lastPollTime = micros();
 	uint32_t m_lastRotationPacketSent = 0;
 	uint32_t m_lastTemperaturePacketSent = 0;
+
+	MotionProcessing::OnlineRestCalibrator m_onlineRestCalibrator{imu::AccTs, imu::GyrTs};
 };
 
 }  // namespace SlimeVR::Sensors
